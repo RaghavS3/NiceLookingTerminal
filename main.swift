@@ -282,7 +282,6 @@ struct NativeTerminalView: View {
     
     var body: some View {
         ZStack {
-            // Invisible, transparent responder that catches keystrokes
             NativeKeyboardInputView(
                 onInput: { chars in
                     session.ptySession?.write(chars)
@@ -292,7 +291,6 @@ struct NativeTerminalView: View {
             )
             .frame(width: 1, height: 1)
             
-            // Highly optimized native lines list view
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
@@ -345,6 +343,24 @@ struct VisualEffectView: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
+// MARK: - Dynamic Native Window Accessor
+
+struct WindowAccessor: NSViewRepresentable {
+    var callback: (NSWindow) -> Void
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            if let window = view.window {
+                callback(window)
+            }
+        }
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 // MARK: - Clean Resizable Grid Split Controller
 
 class WorkspaceManager: ObservableObject {
@@ -369,8 +385,7 @@ class WorkspaceManager: ObservableObject {
             TerminalSession()
         ]
         
-        // Auto-focus the first terminal window at startup
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             self.sessions[0].shouldFocus = true
         }
     }
@@ -557,6 +572,24 @@ struct ContentView: View {
             FloatingLayoutSwitcher(workspaceManager: workspaceManager)
                 .padding(.top, 25)
         }
+        .background(
+            WindowAccessor { window in
+                window.titlebarAppearsTransparent = true
+                window.titleVisibility = .hidden
+                window.styleMask.insert(.fullSizeContentView)
+                window.backgroundColor = .clear
+                window.isOpaque = false
+                window.hasShadow = true
+                window.isMovableByWindowBackground = true
+                
+                window.setFrame(NSRect(x: 100, y: 100, width: 1360, height: 840), display: true)
+                window.minSize = NSSize(width: 800, height: 500)
+                
+                // Force window key status and pull to the direct front of the screen
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        )
         .preferredColorScheme(.dark)
         .foregroundColor(.white)
     }
@@ -566,19 +599,7 @@ struct ContentView: View {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if let window = NSApplication.shared.windows.first {
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.styleMask.insert(.fullSizeContentView)
-            window.backgroundColor = .clear
-            window.isOpaque = false
-            window.hasShadow = true
-            
-            window.isMovableByWindowBackground = true
-            
-            window.setFrame(NSRect(x: 100, y: 100, width: 1360, height: 840), display: true)
-            window.minSize = NSSize(width: 800, height: 500)
-        }
+        NSApp.activate(ignoringOtherApps: true)
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
