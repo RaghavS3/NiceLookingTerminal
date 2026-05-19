@@ -273,7 +273,6 @@ struct NativeTerminalView: View {
     
     var body: some View {
         ZStack {
-            // Backing view capturing clicks natively across the entire card
             NativeKeyboardInputView(
                 onInput: { chars in
                     session.ptySession?.write(chars)
@@ -282,7 +281,6 @@ struct NativeTerminalView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             
-            // Highly optimized native scrollable lines
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
@@ -543,54 +541,34 @@ struct ContentView: View {
     }
 }
 
-// MARK: - macOS App Entrypoint
+// MARK: - macOS App Delegate and Entrypoint
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    let window: NSWindow
+    
+    init(window: NSWindow) {
+        self.window = window
+        super.init()
+    }
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setupWindowWithRetry()
-    }
-    
-    private func setupWindowWithRetry() {
-        if let window = NSApplication.shared.windows.first {
-            configureWindow(window)
-        } else {
-            // Polling retry every 100ms until SwiftUI window mounts
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.setupWindowWithRetry()
-            }
-        }
-    }
-    
-    private func configureWindow(_ window: NSWindow) {
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.styleMask.insert(.fullSizeContentView)
-        window.backgroundColor = .clear
-        window.isOpaque = false
-        window.hasShadow = true
-        window.isMovableByWindowBackground = true
-        
-        window.setFrame(NSRect(x: 100, y: 100, width: 1360, height: 840), display: true)
-        window.minSize = NSSize(width: 800, height: 500)
-        
-        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
-        // Auto-focus the first terminal card once window setup is solid
+        // Auto-focus the first capture view on startup
         if let contentView = window.contentView,
-           let firstCaptureView = findCaptureView(in: contentView) {
+           let firstCapture = findCaptureView(in: contentView) {
             DispatchQueue.main.async {
-                window.makeFirstResponder(firstCaptureView)
+                self.window.makeFirstResponder(firstCapture)
             }
         }
     }
     
     private func findCaptureView(in view: NSView) -> KeyboardCaptureNSView? {
-        if let captureView = view as? KeyboardCaptureNSView {
-            return captureView
+        if let capture = view as? KeyboardCaptureNSView {
+            return capture
         }
-        for subview in view.subviews {
-            if let found = findCaptureView(in: subview) {
+        for sub in view.subviews {
+            if let found = findCaptureView(in: sub) {
                 return found
             }
         }
@@ -602,15 +580,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-@main
-struct MyTerminalApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .background(VisualEffectView(material: .hudWindow, blendingMode: .behindWindow).ignoresSafeArea())
-        }
-        .windowStyle(.hiddenTitleBar)
-    }
-}
+// MARK: - Pure AppKit Application Bootstrapper
+
+let app = NSApplication.shared
+app.setActivationPolicy(.regular) // Explicitly register as a standard Dock GUI app
+
+let rect = NSRect(x: 100, y: 100, width: 1360, height: 840)
+let window = NSWindow(
+    contentRect: rect,
+    styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+    backing: .buffered,
+    defer: false
+)
+
+window.titlebarAppearsTransparent = true
+window.titleVisibility = .hidden
+// Slightly opaque dark-slate slate backstop to guarantee visibility regardless of Accessibility / Reduce Transparency
+window.backgroundColor = NSColor(red: 0.08, green: 0.08, blue: 0.11, alpha: 0.95)
+window.isOpaque = false
+window.hasShadow = true
+window.isMovableByWindowBackground = true
+
+// Wrap our SwiftUI ContentView in a native AppKit NSHostingView wrapper
+window.contentView = NSHostingView(
+    rootView: ContentView()
+        .background(VisualEffectView(material: .hudWindow, blendingMode: .behindWindow).ignoresSafeArea())
+)
+
+window.makeKeyAndOrderFront(nil)
+
+let delegate = AppDelegate(window: window)
+app.delegate = delegate
+
+app.run()
