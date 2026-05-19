@@ -124,10 +124,10 @@ class PTYSession {
 
 // MARK: - Native High-Performance Terminal Stream Buffer
 
-class TerminalBuffer: ObservableObject {
-    @Published var lines: [String] = [""]
+struct TerminalBuffer {
+    var lines: [String] = [""]
     
-    func append(_ text: String) {
+    mutating func append(_ text: String) {
         var currentLine = lines.last ?? ""
         
         var i = text.startIndex
@@ -218,6 +218,20 @@ class KeyboardCaptureNSView: NSView {
     var onInput: ((String) -> Void)?
     var onFocusChange: ((Bool) -> Void)?
     
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        self.wantsLayer = true
+        self.layer?.backgroundColor = NSColor.clear.cgColor
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return self.bounds.contains(point) ? self : nil
+    }
+    
     override var acceptsFirstResponder: Bool { true }
     
     override func becomeFirstResponder() -> Bool {
@@ -288,7 +302,7 @@ struct NativeTerminalView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(0..<session.terminalBuffer.lines.count, id: \.self) { index in
-                            Text(session.terminalBuffer.lines[index])
+                            Text(session.terminalBuffer.lines[index].isEmpty ? " " : session.terminalBuffer.lines[index])
                                 .font(.system(size: 12.5, weight: .regular, design: .monospaced))
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity, alignment: .leading)
