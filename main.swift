@@ -1,27 +1,131 @@
 import SwiftUI
 import AppKit
+import WebKit
 import Foundation
 import Combine
+import Darwin
 
-// MARK: - Models
+// MARK: - POSIX Pseudo-Terminal Session (Real Shell Integration)
 
-struct ANSISpan: Identifiable, Equatable {
-    let id = UUID()
-    let text: String
-    let color: Color
-    let isBold: Bool
-}
-
-struct TerminalOutput: Identifiable, Equatable {
-    let id = UUID()
-    let command: String
-    var rawOutput: String
+class PTYSession {
+    var masterFD: Int32 = -1
+    var childPID: pid_t = -1
+    var readSource: DispatchSourceRead?
+    var onData: ((String) -> Void)?
     
-    var ansiSpans: [ANSISpan] {
-        guard !rawOutput.isEmpty else { return [] }
-        return parseANSI(rawOutput)
+    init(onData: @escaping (String) -> Void) {
+        self.onData = onData
+        start()
+    }
+    
+    func start() {
+        var master: Int32 = 0
+        var size = winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
+        
+        // Spawn a low-level pseudo-terminal and fork the process
+        let pid = forkpty(&master, nil, nil, &size)
+        if pid < 0 {
+            print("[PTYError] forkpty failed")
+            return
+        }
+        
+        if pid == 0 {
+            // Child process: configure terminal environment and execute system Zsh
+            setenv("TERM", "xterm-256color", 1)
+            setenv("LANG", "en_US.UTF-8", 1)
+            
+            let shell = "/bin/zsh"
+            let args = ["--login"]
+            
+            let cShell = shell.cString(using: .utf8)!
+            let cArgs = args.map { $0.cString(using: .utf8)! }
+            
+            var argv: [UnsafeMutablePointer<CChar>?] = []
+            argv.append(UnsafeMutablePointer(mutating: cShell))
+            for arg in cArgs {
+                argv.append(UnsafeMutablePointer(mutating: arg))
+            }
+            argv.append(nil)
+            
+            execvp(shell, &argv)
+            exit(1) // Exec failed
+        } else {
+            // Parent process: keep master file descriptor and start background reading
+            self.masterFD = master
+            self.childPID = pid
+            
+            // Set file descriptor to non-blocking read state
+            fcntl(master, F_SETFL, O_NONBLOCK)
+            
+            let queue = DispatchQueue(label: "com.myterm.pty.read-\(UUID().uuidString)")
+            let source = DispatchSource.makeReadSource(fileDescriptor: master, queue: queue)
+            
+            source.setEventHandler { [weak self] in
+                guard let self = self else { return }
+                var buffer = [UInt8](repeating: 0, count: 8192)
+                let bytesRead = Darwin.read(self.masterFD, &buffer, buffer.count)
+                
+                if bytesRead > 0 {
+                    let data = Data(bytes: buffer, count: bytesRead)
+                    // Encode data as Base64 to safely bridge binary and UTF-8 shell characters to JS
+                    let base64String = data.base64EncodedString()
+                    DispatchQueue.main.async {
+                        self.onData?(base64String)
+                    }
+                } else if bytesRead < 0 {
+                    let err = errno
+                    if err != EAGAIN && err != EINTR {
+                        self.stop()
+                    }
+                } else {
+                    // EOF
+                    self.stop()
+                }
+            }
+            
+            source.setCancelHandler { [weak self] in
+                guard let self = self else { return }
+                Darwin.close(self.masterFD)
+            }
+            
+            self.readSource = source
+            source.resume()
+        }
+    }
+    
+    func write(_ string: String) {
+        guard masterFD >= 0 else { return }
+        if let data = string.data(using: .utf8) {
+            data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                if let baseAddress = bytes.baseAddress {
+                    let _ = Darwin.write(self.masterFD, baseAddress, data.count)
+                }
+            }
+        }
+    }
+    
+    func resize(cols: Int, rows: Int) {
+        guard masterFD >= 0 else { return }
+        var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+        let _ = ioctl(masterFD, UInt(TIOCSWINSZ), &size)
+    }
+    
+    func stop() {
+        readSource?.cancel()
+        readSource = nil
+        masterFD = -1
+        if childPID > 0 {
+            kill(childPID, SIGKILL)
+            childPID = -1
+        }
+    }
+    
+    deinit {
+        stop()
     }
 }
+
+// MARK: - Models and States
 
 class TerminalSession: ObservableObject, Identifiable {
     let id = UUID()
@@ -30,255 +134,205 @@ class TerminalSession: ObservableObject, Identifiable {
     @Published var path: String = "~/projects/nebula"
     @Published var tag: String = "idle"
     @Published var tagColor: Color = .gray
-    @Published var commandInput: String = ""
-    @Published var outputs: [TerminalOutput] = []
     
-    // Custom state control for rich widgets
-    @Published var widgetType: String = "none" // "planning", "audit", "explore", "build", "review", "worktree", "none"
-    @Published var isRunning: Bool = false
+    // View Modes: "dashboard" (gorgeous visualization cards) or "terminal" (REAL Zsh shell terminal itself!)
+    @Published var viewMode: String = "terminal"
+    @Published var widgetType: String = "none" // Widget dashboard preset
     
-    // Build Widget state
-    @Published var buildProgress: Double = 0.68
-    @Published var buildStep: Int = 3
+    // PTY session reference
+    var ptySession: PTYSession?
     
-    // Animation timer
-    private var timer: AnyCancellable?
-    private var process: Process?
-    private var outputPipe: Pipe?
+    // Hook callback for transparent Cocoa WKWebView instance
+    var onDataReceived: ((String) -> Void)?
     
-    init(index: String, name: String, tag: String = "idle", tagColor: Color = .gray, widgetType: String = "none") {
+    init(index: String, name: String, tag: String = "idle", tagColor: Color = .gray, widgetType: String = "none", viewMode: String = "terminal") {
         self.index = index
         self.name = name
         self.tag = tag
         self.tagColor = tagColor
         self.widgetType = widgetType
+        self.viewMode = viewMode
         
-        if widgetType == "build" {
-            startBuildAnimation()
-        }
+        // Spawn active background PTY shell immediately
+        self.ptySession = PTYSession(onData: { [weak self] base64String in
+            self?.onDataReceived?(base64String)
+        })
     }
     
-    func executeCommand() {
-        let cmd = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cmd.isEmpty else { return }
-        
-        // Clear input
-        commandInput = ""
-        
-        // 1. Check for built-in dashboard commands/demos
-        if cmd == "build" || cmd == "npm run build" {
-            self.outputs.append(TerminalOutput(command: cmd, rawOutput: "Initializing build pipeline..."))
-            self.widgetType = "build"
-            self.tag = "build"
-            self.tagColor = .purple
-            startBuildAnimation()
-            return
-        }
-        
-        if cmd == "audit" {
-            self.outputs.append(TerminalOutput(command: cmd, rawOutput: "Running vulnerability scanners..."))
-            self.widgetType = "audit"
-            self.tag = "audit"
-            self.tagColor = .blue
-            return
-        }
-        
-        if cmd == "review" {
-            self.outputs.append(TerminalOutput(command: cmd, rawOutput: "Analyzing local git diffs..."))
-            self.widgetType = "review"
-            self.tag = "review"
-            self.tagColor = .purple
-            return
-        }
-        
-        if cmd == "explore" {
-            self.outputs.append(TerminalOutput(command: cmd, rawOutput: "Starting explorer agent..."))
-            self.widgetType = "explore"
-            self.tag = "explore"
-            self.tagColor = .green
-            return
-        }
-        
-        if cmd == "clear" {
-            self.outputs.removeAll()
-            self.widgetType = "none"
-            self.tag = "idle"
-            self.tagColor = .gray
-            return
-        }
-        
-        if cmd.hasPrefix("cd ") {
-            let directory = cmd.replacingOccurrences(of: "cd ", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let expanded = (directory as NSString).expandingTildeInPath
-            
-            // Check if directory exists
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir) && isDir.boolValue {
-                self.path = directory
-                self.outputs.append(TerminalOutput(command: cmd, rawOutput: "Changed directory to \(directory)"))
-            } else {
-                self.outputs.append(TerminalOutput(command: cmd, rawOutput: "cd: no such file or directory: \(directory)"))
-            }
-            return
-        }
-        
-        // 2. Fallback to executing standard system command in zsh!
-        runSystemCommand(cmd)
-    }
-    
-    private func runSystemCommand(_ cmd: String) {
-        self.isRunning = true
-        self.widgetType = "none"
-        self.tag = "running"
-        self.tagColor = .yellow
-        
-        let outputEntry = TerminalOutput(command: cmd, rawOutput: "")
-        self.outputs.append(outputEntry)
-        let outputIndex = self.outputs.count - 1
-        
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        proc.arguments = ["-c", cmd]
-        
-        // Inherit exact environment variables for normal shell permissions
-        proc.environment = ProcessInfo.processInfo.environment
-        
-        // Set running directory
-        let expandedPath = (path as NSString).expandingTildeInPath
-        if FileManager.default.fileExists(atPath: expandedPath) {
-            proc.currentDirectoryURL = URL(fileURLWithPath: expandedPath)
-        }
-        
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        
-        self.process = proc
-        self.outputPipe = pipe
-        
-        let fileHandle = pipe.fileHandleForReading
-        fileHandle.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            if let text = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    if outputIndex < self.outputs.count {
-                        self.outputs[outputIndex].rawOutput += text
-                    }
-                }
-            }
-        }
-        
-        proc.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isRunning = false
-                self.tag = "idle"
-                self.tagColor = .gray
-                self.process = nil
-                self.outputPipe = nil
-            }
-        }
-        
-        do {
-            try proc.run()
-        } catch {
-            self.isRunning = false
-            self.tag = "error"
-            self.tagColor = .red
-            if outputIndex < self.outputs.count {
-                self.outputs[outputIndex].rawOutput = "Error launching command: \(error.localizedDescription)"
-            }
-        }
-    }
-    
-    private func startBuildAnimation() {
-        timer?.cancel()
-        buildProgress = 0.0
-        buildStep = 0
-        
-        timer = Timer.publish(every: 0.15, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self = self else { return }
-                if self.buildProgress < 1.0 {
-                    self.buildProgress += 0.015
-                    
-                    // Progress stages
-                    if self.buildProgress > 0.20 && self.buildStep == 0 {
-                        self.buildStep = 1
-                    } else if self.buildProgress > 0.45 && self.buildStep == 1 {
-                        self.buildStep = 2
-                    } else if self.buildProgress > 0.68 && self.buildStep == 2 {
-                        self.buildStep = 3
-                    } else if self.buildProgress > 0.85 && self.buildStep == 3 {
-                        self.buildStep = 4
-                    }
-                } else {
-                    self.buildProgress = 1.0
-                    self.buildStep = 5
-                    self.tag = "idle"
-                    self.tagColor = .gray
-                    self.timer?.cancel()
-                }
-            }
+    deinit {
+        ptySession?.stop()
     }
 }
 
-// MARK: - ANSI Color Parser
+// MARK: - Transparent Cocoa WebView Terminal Renderer (xterm.js embed)
 
-func parseANSI(_ input: String) -> [ANSISpan] {
-    var spans: [ANSISpan] = []
-    let parts = input.components(separatedBy: "\u{001B}[")
+struct TerminalWebView: NSViewRepresentable {
+    @ObservedObject var session: TerminalSession
     
-    if let first = parts.first, !first.isEmpty {
-        spans.append(ANSISpan(text: first, color: .white, isBold: false))
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let contentController = WKUserContentController()
+        
+        // Handle input events and terminal size reports dynamically from JavaScript
+        contentController.add(context.coordinator, name: "terminalInput")
+        contentController.add(context.coordinator, name: "terminalResize")
+        
+        config.userContentController = contentController
+        
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        
+        // Premium feature: make the web view background completely transparent
+        webView.setValue(false, forKey: "drawsBackground")
+        
+        // Assemble and load the local inline HTML container
+        let html = getTerminalHTML()
+        webView.loadHTMLString(html, baseURL: URL(string: "https://localhost"))
+        
+        context.coordinator.webView = webView
+        return webView
     }
     
-    var currentColor = Color.white
-    var currentBold = false
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        // PTY session reference update if needed
+    }
     
-    for part in parts.dropFirst() {
-        guard !part.isEmpty else { continue }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        var parent: TerminalWebView
+        var webView: WKWebView?
         
-        if let mIndex = part.firstIndex(of: "m") {
-            let codeString = part[..<mIndex]
-            let remainingText = part[part.index(after: mIndex)...]
+        init(_ parent: TerminalWebView) {
+            self.parent = parent
+            super.init()
             
-            let codes = codeString.components(separatedBy: ";")
-            for code in codes {
-                switch code {
-                case "0":
-                    currentColor = .white
-                    currentBold = false
-                case "1":
-                    currentBold = true
-                case "30": currentColor = .black
-                case "31": currentColor = Color(red: 0.95, green: 0.35, blue: 0.35) // Elegant red
-                case "32": currentColor = Color(red: 0.35, green: 0.85, blue: 0.45) // Elegant green
-                case "33": currentColor = Color(red: 0.95, green: 0.80, blue: 0.35) // Elegant yellow
-                case "34": currentColor = Color(red: 0.35, green: 0.60, blue: 0.95) // Elegant blue
-                case "35": currentColor = Color(red: 0.80, green: 0.45, blue: 0.95) // Elegant magenta
-                case "36": currentColor = Color(red: 0.35, green: 0.85, blue: 0.95) // Elegant cyan
-                case "37": currentColor = .white
-                case "90": currentColor = .gray
-                default: break
+            // Link raw data listener callback from POSIX PTY directly into the WebView renderer
+            parent.session.onDataReceived = { [weak self] base64String in
+                self?.writeToTerminal(base64: base64String)
+            }
+        }
+        
+        // Receive messages from JS
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "terminalInput", let input = message.body as? String {
+                // Write keyboard keystrokes instantly to POSIX shell standard input
+                parent.session.ptySession?.write(input)
+            } else if message.name == "terminalResize", let dict = message.body as? [String: Int] {
+                // Keep the POSIX process pty window size in sync when dividers are resized by user
+                if let cols = dict["cols"], let rows = dict["rows"] {
+                    parent.session.ptySession?.resize(cols: cols, rows: rows)
+                }
+            }
+        }
+        
+        func writeToTerminal(base64: String) {
+            let js = "writeBase64('\(base64)');"
+            webView?.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+}
+
+// MARK: - Transparent Terminal HTML Template with xterm.js
+
+func getTerminalHTML() -> String {
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+        <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+        <style>
+            html, body {
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                background: transparent !important;
+                overflow: hidden;
+            }
+            #terminal-container {
+                width: 100%;
+                height: 100%;
+                background: transparent !important;
+                padding: 10px;
+                box-sizing: border-box;
+            }
+            .xterm .xterm-viewport {
+                background-color: transparent !important;
+            }
+            .xterm-screen {
+                background-color: transparent !important;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="terminal-container"></div>
+        <script>
+            // Configure premium xterm renderer with a transparent visual backing and neon themes
+            const term = new Terminal({
+                allowProposedApi: true,
+                theme: {
+                    background: 'transparent',
+                    foreground: '#ffffff',
+                    cursor: '#a855f7',
+                    selectionBackground: 'rgba(168, 85, 247, 0.3)',
+                    black: '#000000',
+                    red: '#ef4444',
+                    green: '#22c55e',
+                    yellow: '#eab308',
+                    blue: '#3b82f6',
+                    magenta: '#a855f7',
+                    cyan: '#06b6d4',
+                    white: '#ffffff',
+                },
+                cursorBlink: true,
+                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                fontSize: 12,
+                rows: 30,
+                cols: 80
+            });
+            
+            term.open(document.getElementById('terminal-container'));
+            
+            // Forward keystrokes directly to Swift message dispatcher
+            term.onData(data => {
+                window.webkit.messageHandlers.terminalInput.postMessage(data);
+            });
+            
+            // Safely write base64 strings decoded to binary
+            function writeBase64(base64) {
+                try {
+                    const raw = atob(base64);
+                    term.write(raw);
+                } catch(e) {
+                    console.error("Base64 write error", e);
                 }
             }
             
-            if !remainingText.isEmpty {
-                spans.append(ANSISpan(text: String(remainingText), color: currentColor, isBold: currentBold))
+            // Report responsive bounds changes dynamically
+            function reportResize() {
+                const cols = Math.floor((window.innerWidth - 20) / 7.2); // width of a char
+                const rows = Math.floor((window.innerHeight - 20) / 14.5); // height of a char
+                if (cols > 0 && rows > 0) {
+                    term.resize(cols, rows);
+                    window.webkit.messageHandlers.terminalResize.postMessage({ cols, rows });
+                }
             }
-        } else {
-            spans.append(ANSISpan(text: "\u{001B}[" + part, color: currentColor, isBold: currentBold))
-        }
-    }
-    
-    return spans
+            
+            window.addEventListener('resize', reportResize);
+            // Wait slightly for container rendering
+            setTimeout(reportResize, 150);
+        </script>
+    </body>
+    </html>
+    """
 }
 
-// MARK: - Visual Effect (Glassmorphism)
+// MARK: - Visual Effect (Glassmorphism Backdrop)
 
 struct VisualEffectView: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .hudWindow
@@ -300,41 +354,7 @@ struct VisualEffectView: NSViewRepresentable {
     }
 }
 
-// MARK: - Helper Sparkline Line Chart
-
-struct Sparkline: Shape {
-    let dataPoints: [Double]
-    
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        guard dataPoints.count > 1 else { return path }
-        
-        let width = rect.width
-        let height = rect.height
-        let stepX = width / CGFloat(dataPoints.count - 1)
-        
-        let minY = dataPoints.min() ?? 0
-        let maxY = dataPoints.max() ?? 1
-        let range = maxY - minY == 0 ? 1 : maxY - minY
-        
-        let points = dataPoints.enumerated().map { index, value -> CGPoint in
-            let x = CGFloat(index) * stepX
-            let normalizedY = CGFloat((value - minY) / range)
-            // Flip vertical axis for screen coordinates
-            let y = height - (normalizedY * height * 0.7) - (height * 0.15)
-            return CGPoint(x: x, y: y)
-        }
-        
-        path.move(to: points[0])
-        for i in 1..<points.count {
-            path.addLine(to: points[i])
-        }
-        
-        return path
-    }
-}
-
-// MARK: - Custom Glassmorphic Card View
+// MARK: - Premium Glassmorphic Card Container
 
 struct GlassCard<Content: View>: View {
     let content: Content
@@ -365,6 +385,39 @@ struct GlassCard<Content: View>: View {
                 )
         )
         .shadow(color: Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+    }
+}
+
+// MARK: - Helper Sparkline Line Chart
+
+struct Sparkline: Shape {
+    let dataPoints: [Double]
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard dataPoints.count > 1 else { return path }
+        
+        let width = rect.width
+        let height = rect.height
+        let stepX = width / CGFloat(dataPoints.count - 1)
+        
+        let minY = dataPoints.min() ?? 0
+        let maxY = dataPoints.max() ?? 1
+        let range = maxY - minY == 0 ? 1 : maxY - minY
+        
+        let points = dataPoints.enumerated().map { index, value -> CGPoint in
+            let x = CGFloat(index) * stepX
+            let normalizedY = CGFloat((value - minY) / range)
+            let y = height - (normalizedY * height * 0.7) - (height * 0.15)
+            return CGPoint(x: x, y: y)
+        }
+        
+        path.move(to: points[0])
+        for i in 1..<points.count {
+            path.addLine(to: points[i])
+        }
+        
+        return path
     }
 }
 
@@ -678,7 +731,6 @@ struct LayoutButton: View {
 
 struct PaneView: View {
     @ObservedObject var session: TerminalSession
-    @State private var autoscroll = true
     
     var body: some View {
         GlassCard {
@@ -700,7 +752,40 @@ struct PaneView: View {
                 
                 Spacer()
                 
-                // Status Pill
+                // Toggle mode selector: Tab switcher between beautiful widgets and REAL shells
+                HStack(spacing: 0) {
+                    Button(action: { session.viewMode = "dashboard" }) {
+                        Text("Widget")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(session.viewMode == "dashboard" ? Color.white.opacity(0.12) : Color.clear)
+                            .foregroundColor(session.viewMode == "dashboard" ? .white : .gray)
+                            .cornerRadius(5)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: { session.viewMode = "terminal" }) {
+                        Text("Terminal")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(session.viewMode == "terminal" ? Color.white.opacity(0.12) : Color.clear)
+                            .foregroundColor(session.viewMode == "terminal" ? .white : .gray)
+                            .cornerRadius(5)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(2)
+                .background(Color.black.opacity(0.25))
+                .cornerRadius(7)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+                .padding(.trailing, 5)
+                
+                // State Tag Pill
                 Text(session.tag)
                     .font(.caption2)
                     .bold()
@@ -717,133 +802,42 @@ struct PaneView: View {
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.vertical, 10)
             .background(Color.white.opacity(0.02))
             
             Divider()
                 .background(Color.white.opacity(0.06))
             
-            // Pane Workspace Content
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        
-                        // 1. Render Active Dashboard Widget (If active)
-                        if session.widgetType == "planning" {
-                            PlanningWidgetView()
-                        } else if session.widgetType == "audit" {
-                            AuditWidgetView()
-                        } else if session.widgetType == "explore" {
-                            ExploreWidgetView()
-                        } else if session.widgetType == "build" {
-                            BuildWidgetView(progress: session.buildProgress, step: session.buildStep)
-                        } else if session.widgetType == "review" {
-                            ReviewWidgetView()
-                        } else if session.widgetType == "worktree" {
-                            WorktreeWidgetView()
-                        }
-                        
-                        // 2. Render Historical Command Log & Native CLI Outputs
-                        ForEach(session.outputs) { out in
-                            VStack(alignment: .leading, spacing: 6) {
-                                // Render original typed command line
-                                HStack(spacing: 6) {
-                                    Text(">")
-                                        .foregroundColor(.purple)
-                                        .bold()
-                                    Text(out.command)
-                                        .foregroundColor(.white)
-                                        .bold()
-                                }
-                                .font(.system(.body, design: .monospaced))
-                                
-                                // Render formatted CLI Output
-                                if !out.rawOutput.isEmpty {
-                                    ANSITextView(spans: out.ansiSpans)
-                                        .padding(.leading, 12)
-                                        .textSelection(.enabled)
-                                }
-                            }
-                            .id(out.id)
-                        }
-                        
-                        // Empty anchor for autoscroll
-                        Color.clear
-                            .frame(height: 1)
-                            .id("bottom")
-                    }
-                    .padding(16)
-                }
-                .onChange(of: session.outputs.count) {
-                    if autoscroll {
-                        withAnimation {
-                            proxy.scrollTo("bottom", anchor: .bottom)
-                        }
-                    }
-                }
-            }
-            
-            Divider()
-                .background(Color.white.opacity(0.06))
-            
-            // Pane Command Input Footer
-            HStack {
-                Text(">")
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.purple)
-                    .bold()
-                
-                TextField("Type a command...", text: $session.commandInput, onCommit: {
-                    session.executeCommand()
-                })
-                .textFieldStyle(.plain)
-                .font(.system(.body, design: .monospaced))
-                .foregroundColor(.white)
-                
-                Spacer()
-                
-                // Pulse loading spinner when active zsh command runs
-                if session.isRunning {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.8)
+            // Main card frame contents
+            ZStack {
+                if session.viewMode == "terminal" {
+                    // 100% REAL Shell Pseudo-Terminal!
+                    TerminalWebView(session: session)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    Button(action: {
-                        session.executeCommand()
-                    }) {
-                        Image(systemName: "arrow.turn.down.left")
-                            .foregroundColor(.gray)
+                    // Gorgeous visual AI/Build dashboard widget!
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            if session.widgetType == "planning" {
+                                PlanningWidgetView()
+                            } else if session.widgetType == "audit" {
+                                AuditWidgetView()
+                            } else if session.widgetType == "explore" {
+                                ExploreWidgetView()
+                            } else if session.widgetType == "build" {
+                                BuildWidgetView()
+                            } else if session.widgetType == "review" {
+                                ReviewWidgetView()
+                            } else if session.widgetType == "worktree" {
+                                WorktreeWidgetView()
+                            }
+                        }
+                        .padding(16)
                     }
-                    .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Color.black.opacity(0.2))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-    }
-}
-
-// MARK: - Rich Console Text View with ANSI Colors
-
-struct ANSITextView: View {
-    let spans: [ANSISpan]
-    
-    var body: some View {
-        var builder = Text("")
-        for span in spans {
-            var textRun = Text(span.text)
-                .foregroundColor(span.color)
-            if span.isBold {
-                textRun = textRun.bold()
-            }
-            builder = builder + textRun
-        }
-        
-        return builder
-            .font(.system(.body, design: .monospaced))
-            .lineSpacing(4)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -863,12 +857,13 @@ class WorkspaceManager: ObservableObject {
     
     init() {
         self.sessions = [
-            TerminalSession(index: "01", name: "Planning", tag: "plan", tagColor: .purple, widgetType: "planning"),
-            TerminalSession(index: "02", name: "Audit", tag: "audit", tagColor: .blue, widgetType: "audit"),
-            TerminalSession(index: "03", name: "Explore", tag: "explore", tagColor: .green, widgetType: "explore"),
-            TerminalSession(index: "04", name: "Build", tag: "build", tagColor: .purple, widgetType: "build"),
-            TerminalSession(index: "05", name: "Review", tag: "review", tagColor: .purple, widgetType: "review"),
-            TerminalSession(index: "06", name: "Worktree", tag: "idle", tagColor: .gray, widgetType: "worktree")
+            // Start sessions 1, 2, 4, 5 in Dashboard preset widgets, and sessions 3, 6 in fully-active terminal shells!
+            TerminalSession(index: "01", name: "Planning", tag: "plan", tagColor: .purple, widgetType: "planning", viewMode: "dashboard"),
+            TerminalSession(index: "02", name: "Audit", tag: "audit", tagColor: .blue, widgetType: "audit", viewMode: "dashboard"),
+            TerminalSession(index: "03", name: "Explore", tag: "explore", tagColor: .green, widgetType: "explore", viewMode: "terminal"),
+            TerminalSession(index: "04", name: "Build", tag: "build", tagColor: .purple, widgetType: "build", viewMode: "dashboard"),
+            TerminalSession(index: "05", name: "Review", tag: "review", tagColor: .purple, widgetType: "review", viewMode: "dashboard"),
+            TerminalSession(index: "06", name: "Worktree", tag: "idle", tagColor: .gray, widgetType: "worktree", viewMode: "terminal")
         ]
     }
 }
@@ -983,7 +978,7 @@ struct GridContainerView: View {
     }
 }
 
-// MARK: - GUI Dashboard Widgets (Rich Output UI)
+// MARK: - GUI Dashboard Widgets (Rich Output UI presets)
 
 struct PlanningWidgetView: View {
     @State private var thinkingPulse = false
@@ -1220,13 +1215,10 @@ struct ExploreCheckRow: View {
 }
 
 struct BuildWidgetView: View {
-    let progress: Double
-    let step: Int
     @State private var rotationAngle = 0.0
     
     var body: some View {
         VStack(alignment: .center, spacing: 15) {
-            
             // Rotating loader
             ZStack {
                 Circle()
@@ -1262,18 +1254,17 @@ struct BuildWidgetView: View {
                     .foregroundColor(.gray)
             }
             
-            // Execution stages
             VStack(alignment: .leading, spacing: 8) {
-                BuildStepRow(completed: step >= 1, text: "Install dependencies", duration: "1.2s")
-                BuildStepRow(completed: step >= 2, text: "Type check", duration: "2.8s")
-                BuildStepRow(completed: step >= 3, text: "Build production bundle", duration: "5.6s")
-                BuildStepRow(completed: step >= 4, text: "Run tests", duration: "", isPending: step < 4)
-                BuildStepRow(completed: step >= 5, text: "Upload artifacts", duration: "", isPending: step < 5)
+                BuildStepRow(completed: true, text: "Install dependencies", duration: "1.2s")
+                BuildStepRow(completed: true, text: "Type check", duration: "2.8s")
+                BuildStepRow(completed: true, text: "Build production bundle", duration: "5.6s")
+                BuildStepRow(completed: false, text: "Run tests", duration: "", isPending: true)
+                BuildStepRow(completed: false, text: "Upload artifacts", duration: "", isPending: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             
-            // Progress Bar widget
+            // Progress Bar
             HStack(spacing: 12) {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
@@ -1289,12 +1280,12 @@ struct BuildWidgetView: View {
                                     endPoint: .trailing
                                 )
                             )
-                            .frame(width: geo.size.width * CGFloat(progress), height: 6)
+                            .frame(width: geo.size.width * 0.68, height: 6)
                     }
                 }
                 .frame(height: 6)
                 
-                Text("\(Int(progress * 100))%")
+                Text("68%")
                     .font(.system(.caption, design: .monospaced))
                     .bold()
                     .foregroundColor(.gray)
@@ -1338,9 +1329,8 @@ struct ReviewWidgetView: View {
                 .foregroundColor(.white.opacity(0.8))
                 .lineSpacing(3)
             
-            // Custom Code Quality Table
+            // Custom Table
             VStack(spacing: 0) {
-                // Table header
                 HStack {
                     Text("File").foregroundColor(.gray)
                     Spacer()
@@ -1453,7 +1443,6 @@ struct WorktreeWidgetView: View {
                     .foregroundColor(.gray)
             }
             
-            // Keymap Shortcuts
             VStack(spacing: 8) {
                 ShortcutRow(keys: ["⌘", "N"], action: "New Worktree")
                 ShortcutRow(keys: ["⌘", "R"], action: "Restore Session")
@@ -1527,7 +1516,7 @@ struct ContentView: View {
                 Divider()
                     .background(Color.white.opacity(0.08))
                 
-                // Active workspace panes grid
+                // Active workspace resizable grid
                 GridContainerView(workspaceManager: workspaceManager)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -1537,7 +1526,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - macOS App Main entrypoint
+// MARK: - macOS App Main Entrypoint
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1549,10 +1538,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             window.isOpaque = false
             window.hasShadow = true
             
-            // Premium feature: make background draggable so window can be dragged from empty areas
+            // Make background draggable so window can be dragged from empty areas
             window.isMovableByWindowBackground = true
             
-            // Set beautiful starting size
+            // Set starting size
             window.setFrame(NSRect(x: 100, y: 100, width: 1360, height: 840), display: true)
             window.minSize = NSSize(width: 1024, height: 680)
         }
