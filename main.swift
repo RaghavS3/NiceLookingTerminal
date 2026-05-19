@@ -173,7 +173,6 @@ class TerminalBuffer: ObservableObject {
 class TerminalSession: ObservableObject, Identifiable {
     let id = UUID()
     @Published var terminalBuffer = TerminalBuffer()
-    @Published var shouldFocus: Bool = false
     var ptySession: PTYSession?
     
     init() {
@@ -197,7 +196,6 @@ class TerminalSession: ObservableObject, Identifiable {
 struct NativeKeyboardInputView: NSViewRepresentable {
     let onInput: (String) -> Void
     @Binding var isFocused: Bool
-    @Binding var shouldFocus: Bool
     
     func makeNSView(context: Context) -> KeyboardCaptureNSView {
         let view = KeyboardCaptureNSView()
@@ -210,14 +208,7 @@ struct NativeKeyboardInputView: NSViewRepresentable {
         return view
     }
     
-    func updateNSView(_ nsView: KeyboardCaptureNSView, context: Context) {
-        if shouldFocus {
-            DispatchQueue.main.async {
-                nsView.window?.makeFirstResponder(nsView)
-                self.shouldFocus = false
-            }
-        }
-    }
+    func updateNSView(_ nsView: KeyboardCaptureNSView, context: Context) {}
 }
 
 class KeyboardCaptureNSView: NSView {
@@ -282,15 +273,16 @@ struct NativeTerminalView: View {
     
     var body: some View {
         ZStack {
+            // Backing view capturing clicks natively across the entire card
             NativeKeyboardInputView(
                 onInput: { chars in
                     session.ptySession?.write(chars)
                 },
-                isFocused: $isFocused,
-                shouldFocus: $session.shouldFocus
+                isFocused: $isFocused
             )
-            .frame(width: 1, height: 1)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             
+            // Highly optimized native scrollable lines
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
@@ -318,10 +310,6 @@ struct NativeTerminalView: View {
                 .stroke(isFocused ? Color.purple.opacity(0.45) : Color.white.opacity(0.08), lineWidth: isFocused ? 1.5 : 1)
         )
         .cornerRadius(16)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            session.shouldFocus = true
-        }
     }
 }
 
@@ -341,24 +329,6 @@ struct VisualEffectView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
-}
-
-// MARK: - Dynamic Native Window Accessor
-
-struct WindowAccessor: NSViewRepresentable {
-    var callback: (NSWindow) -> Void
-    
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            if let window = view.window {
-                callback(window)
-            }
-        }
-        return view
-    }
-    
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 // MARK: - Clean Resizable Grid Split Controller
@@ -384,10 +354,6 @@ class WorkspaceManager: ObservableObject {
             TerminalSession(),
             TerminalSession()
         ]
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            self.sessions[0].shouldFocus = true
-        }
     }
 }
 
@@ -572,24 +538,6 @@ struct ContentView: View {
             FloatingLayoutSwitcher(workspaceManager: workspaceManager)
                 .padding(.top, 25)
         }
-        .background(
-            WindowAccessor { window in
-                window.titlebarAppearsTransparent = true
-                window.titleVisibility = .hidden
-                window.styleMask.insert(.fullSizeContentView)
-                window.backgroundColor = .clear
-                window.isOpaque = false
-                window.hasShadow = true
-                window.isMovableByWindowBackground = true
-                
-                window.setFrame(NSRect(x: 100, y: 100, width: 1360, height: 840), display: true)
-                window.minSize = NSSize(width: 800, height: 500)
-                
-                // Force window key status and pull to the direct front of the screen
-                window.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
-            }
-        )
         .preferredColorScheme(.dark)
         .foregroundColor(.white)
     }
@@ -599,7 +547,54 @@ struct ContentView: View {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupWindowWithRetry()
+    }
+    
+    private func setupWindowWithRetry() {
+        if let window = NSApplication.shared.windows.first {
+            configureWindow(window)
+        } else {
+            // Polling retry every 100ms until SwiftUI window mounts
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.setupWindowWithRetry()
+            }
+        }
+    }
+    
+    private func configureWindow(_ window: NSWindow) {
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.styleMask.insert(.fullSizeContentView)
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.isMovableByWindowBackground = true
+        
+        window.setFrame(NSRect(x: 100, y: 100, width: 1360, height: 840), display: true)
+        window.minSize = NSSize(width: 800, height: 500)
+        
+        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        
+        // Auto-focus the first terminal card once window setup is solid
+        if let contentView = window.contentView,
+           let firstCaptureView = findCaptureView(in: contentView) {
+            DispatchQueue.main.async {
+                window.makeFirstResponder(firstCaptureView)
+            }
+        }
+    }
+    
+    private func findCaptureView(in view: NSView) -> KeyboardCaptureNSView? {
+        if let captureView = view as? KeyboardCaptureNSView {
+            return captureView
+        }
+        for subview in view.subviews {
+            if let found = findCaptureView(in: subview) {
+                return found
+            }
+        }
+        return nil
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
