@@ -28,24 +28,27 @@ class PTYSession {
         }
         
         if pid == 0 {
-            // Child process: launch shell
+            // Child process: completely isolate session and launch shell
+            setsid() // Break connection to parent's controlling terminal
+            ioctl(0, UInt(TIOCSCTTY), 0) // Set PTY slave as the exclusive controlling terminal
+            
             setenv("TERM", "xterm-256color", 1)
             setenv("LANG", "en_US.UTF-8", 1)
             
             let shell = "/bin/zsh"
-            let args = ["--login"]
+            var arg0 = shell.utf8CString
+            var arg1 = "--login".utf8CString
             
-            let cShell = shell.cString(using: .utf8)!
-            let cArgs = args.map { $0.cString(using: .utf8)! }
-            
-            var argv: [UnsafeMutablePointer<CChar>?] = []
-            argv.append(UnsafeMutablePointer(mutating: cShell))
-            for arg in cArgs {
-                argv.append(UnsafeMutablePointer(mutating: arg))
+            arg0.withUnsafeMutableBufferPointer { p0 in
+                arg1.withUnsafeMutableBufferPointer { p1 in
+                    var argv: [UnsafeMutablePointer<CChar>?] = [
+                        p0.baseAddress,
+                        p1.baseAddress,
+                        nil
+                    ]
+                    execvp(shell, &argv)
+                }
             }
-            argv.append(nil)
-            
-            execvp(shell, &argv)
             exit(1)
         } else {
             self.masterFD = master
@@ -136,7 +139,7 @@ class TerminalBuffer: ObservableObject {
                 lines.append("")
                 currentLine = ""
             } else if char == "\r" {
-                currentLine = ""
+                // Ignore carriage return so we do not wipe out active prompt text
             } else if char == "\u{08}" || char == "\u{7F}" {
                 if !currentLine.isEmpty {
                     currentLine.removeLast()
@@ -544,21 +547,39 @@ struct ContentView: View {
 // MARK: - macOS App Delegate and Entrypoint
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    let window: NSWindow
-    
-    init(window: NSWindow) {
-        self.window = window
-        super.init()
-    }
+    var window: NSWindow?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let rect = NSRect(x: 100, y: 100, width: 1360, height: 840)
+        let window = NSWindow(
+            contentRect: rect,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.backgroundColor = NSColor(red: 0.08, green: 0.08, blue: 0.11, alpha: 0.95)
+        window.isOpaque = false
+        window.hasShadow = true
+        window.isMovableByWindowBackground = true
+        
+        window.contentView = NSHostingView(
+            rootView: ContentView()
+                .background(VisualEffectView(material: .hudWindow, blendingMode: .behindWindow).ignoresSafeArea())
+        )
+        
+        window.makeKeyAndOrderFront(nil)
+        self.window = window
+        
         NSApp.activate(ignoringOtherApps: true)
         
         // Auto-focus the first capture view on startup
         if let contentView = window.contentView,
            let firstCapture = findCaptureView(in: contentView) {
             DispatchQueue.main.async {
-                self.window.makeFirstResponder(firstCapture)
+                window.makeFirstResponder(firstCapture)
             }
         }
     }
@@ -583,33 +604,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Pure AppKit Application Bootstrapper
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular) // Explicitly register as a standard Dock GUI app
+app.setActivationPolicy(.regular) // Register as active Dock GUI application
 
-let rect = NSRect(x: 100, y: 100, width: 1360, height: 840)
-let window = NSWindow(
-    contentRect: rect,
-    styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-    backing: .buffered,
-    defer: false
-)
-
-window.titlebarAppearsTransparent = true
-window.titleVisibility = .hidden
-// Slightly opaque dark-slate slate backstop to guarantee visibility regardless of Accessibility / Reduce Transparency
-window.backgroundColor = NSColor(red: 0.08, green: 0.08, blue: 0.11, alpha: 0.95)
-window.isOpaque = false
-window.hasShadow = true
-window.isMovableByWindowBackground = true
-
-// Wrap our SwiftUI ContentView in a native AppKit NSHostingView wrapper
-window.contentView = NSHostingView(
-    rootView: ContentView()
-        .background(VisualEffectView(material: .hudWindow, blendingMode: .behindWindow).ignoresSafeArea())
-)
-
-window.makeKeyAndOrderFront(nil)
-
-let delegate = AppDelegate(window: window)
+let delegate = AppDelegate()
 app.delegate = delegate
-
 app.run()
