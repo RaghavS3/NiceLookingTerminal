@@ -145,17 +145,58 @@ struct TerminalBuffer {
                     currentLine.removeLast()
                 }
             } else if char == "\u{001B}" {
+                // Handle Escape Sequences (CSI and OSC)
                 var j = text.index(after: i)
-                while j < text.endIndex {
-                    let ec = text[j]
-                    if (ec >= "A" && ec <= "Z") || (ec >= "a" && ec <= "z") {
+                var sequenceHandled = false
+                
+                if j < text.endIndex {
+                    let nextChar = text[j]
+                    if nextChar == "]" {
+                        // OSC Sequence: ends with BEL (\u{0007}) or ESC (\u{001B})
+                        var k = text.index(after: j)
+                        while k < text.endIndex {
+                            if text[k] == "\u{0007}" || text[k] == "\u{001B}" {
+                                i = k
+                                sequenceHandled = true
+                                break
+                            }
+                            k = text.index(after: k)
+                        }
+                        if sequenceHandled { continue }
+                    } else if nextChar == "[" {
+                        // CSI Sequence: ends with alphabetic or '~' or '@'
+                        var k = text.index(after: j)
+                        while k < text.endIndex {
+                            let ec = text[k]
+                            if (ec >= "A" && ec <= "Z") || (ec >= "a" && ec <= "z") || ec == "~" || ec == "@" {
+                                if ec == "K" {
+                                    // CSI K: Erase in Line
+                                    currentLine = ""
+                                }
+                                i = k
+                                sequenceHandled = true
+                                break
+                            }
+                            k = text.index(after: k)
+                        }
+                        if sequenceHandled { continue }
+                    } else if nextChar == "(" || nextChar == ")" {
+                        let k = text.index(after: j)
+                        if k < text.endIndex {
+                            i = k
+                            sequenceHandled = true
+                            continue
+                        }
+                    } else {
                         i = j
-                        break
+                        continue
                     }
-                    j = text.index(after: j)
                 }
             } else {
-                currentLine.append(char)
+                // Ignore BEL and other non-printable characters
+                if char != "\u{0007}" && char != "\u{0000}" {
+                    currentLine.append(char)
+                }
             }
             
             if i < text.endIndex {
@@ -229,7 +270,9 @@ class KeyboardCaptureNSView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        return self.bounds.contains(point) ? self : nil
+        // AppKit hitTest 'point' is in the superview's coordinate system!
+        let localPoint = convert(point, from: superview)
+        return self.bounds.contains(localPoint) ? self : nil
     }
     
     override var acceptsFirstResponder: Bool { true }
