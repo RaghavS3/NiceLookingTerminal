@@ -136,15 +136,12 @@ class TerminalBuffer: ObservableObject {
                 lines.append("")
                 currentLine = ""
             } else if char == "\r" {
-                // Return to start of current line
                 currentLine = ""
             } else if char == "\u{08}" || char == "\u{7F}" {
-                // Backspace: remove last character
                 if !currentLine.isEmpty {
                     currentLine.removeLast()
                 }
             } else if char == "\u{001B}" {
-                // ANSI Escape sequence parser: skip ANSI controls to render clean terminal output
                 var j = text.index(after: i)
                 while j < text.endIndex {
                     let ec = text[j]
@@ -165,7 +162,6 @@ class TerminalBuffer: ObservableObject {
         
         lines[lines.count - 1] = currentLine
         
-        // Limit scrollback to last 400 lines for maximum speed
         if lines.count > 400 {
             lines.removeFirst(lines.count - 400)
         }
@@ -177,6 +173,7 @@ class TerminalBuffer: ObservableObject {
 class TerminalSession: ObservableObject, Identifiable {
     let id = UUID()
     @Published var terminalBuffer = TerminalBuffer()
+    @Published var shouldFocus: Bool = false
     var ptySession: PTYSession?
     
     init() {
@@ -200,8 +197,9 @@ class TerminalSession: ObservableObject, Identifiable {
 struct NativeKeyboardInputView: NSViewRepresentable {
     let onInput: (String) -> Void
     @Binding var isFocused: Bool
+    @Binding var shouldFocus: Bool
     
-    func makeNSView(context: Context) -> NSView {
+    func makeNSView(context: Context) -> KeyboardCaptureNSView {
         let view = KeyboardCaptureNSView()
         view.onInput = onInput
         view.onFocusChange = { focused in
@@ -212,7 +210,14 @@ struct NativeKeyboardInputView: NSViewRepresentable {
         return view
     }
     
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: KeyboardCaptureNSView, context: Context) {
+        if shouldFocus {
+            DispatchQueue.main.async {
+                nsView.window?.makeFirstResponder(nsView)
+                self.shouldFocus = false
+            }
+        }
+    }
 }
 
 class KeyboardCaptureNSView: NSView {
@@ -232,7 +237,6 @@ class KeyboardCaptureNSView: NSView {
     }
     
     override func keyDown(with event: NSEvent) {
-        // Map native keyboard codes for system shells
         if event.keyCode == 126 { // Arrow Up
             onInput?("\u{1B}[A")
             return
@@ -266,7 +270,6 @@ class KeyboardCaptureNSView: NSView {
     }
     
     override func mouseDown(with event: NSEvent) {
-        // Click focuses this cell immediately
         self.window?.makeFirstResponder(self)
     }
 }
@@ -280,9 +283,14 @@ struct NativeTerminalView: View {
     var body: some View {
         ZStack {
             // Invisible, transparent responder that catches keystrokes
-            NativeKeyboardInputView(onInput: { chars in
-                session.ptySession?.write(chars)
-            }, isFocused: $isFocused)
+            NativeKeyboardInputView(
+                onInput: { chars in
+                    session.ptySession?.write(chars)
+                },
+                isFocused: $isFocused,
+                shouldFocus: $session.shouldFocus
+            )
+            .frame(width: 1, height: 1)
             
             // Highly optimized native lines list view
             ScrollViewReader { proxy in
@@ -312,6 +320,10 @@ struct NativeTerminalView: View {
                 .stroke(isFocused ? Color.purple.opacity(0.45) : Color.white.opacity(0.08), lineWidth: isFocused ? 1.5 : 1)
         )
         .cornerRadius(16)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            session.shouldFocus = true
+        }
     }
 }
 
@@ -356,6 +368,11 @@ class WorkspaceManager: ObservableObject {
             TerminalSession(),
             TerminalSession()
         ]
+        
+        // Auto-focus the first terminal window at startup
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.sessions[0].shouldFocus = true
+        }
     }
 }
 
@@ -534,11 +551,9 @@ struct ContentView: View {
     
     var body: some View {
         ZStack(alignment: .top) {
-            // Streamlined, resizable terminal splits
             GridContainerView(workspaceManager: workspaceManager)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             
-            // Layout pill controls at the top center
             FloatingLayoutSwitcher(workspaceManager: workspaceManager)
                 .padding(.top, 25)
         }
