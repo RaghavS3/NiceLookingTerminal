@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import WebKit
 import Foundation
 import Combine
 import Darwin
@@ -120,16 +119,74 @@ class PTYSession {
     }
 }
 
+// MARK: - Native High-Performance Terminal Stream Buffer
+
+class TerminalBuffer: ObservableObject {
+    @Published var lines: [String] = [""]
+    
+    func append(_ text: String) {
+        var currentLine = lines.last ?? ""
+        
+        var i = text.startIndex
+        while i < text.endIndex {
+            let char = text[i]
+            
+            if char == "\n" {
+                lines[lines.count - 1] = currentLine
+                lines.append("")
+                currentLine = ""
+            } else if char == "\r" {
+                // Return to start of current line
+                currentLine = ""
+            } else if char == "\u{08}" || char == "\u{7F}" {
+                // Backspace: remove last character
+                if !currentLine.isEmpty {
+                    currentLine.removeLast()
+                }
+            } else if char == "\u{001B}" {
+                // ANSI Escape sequence parser: skip ANSI controls to render clean terminal output
+                var j = text.index(after: i)
+                while j < text.endIndex {
+                    let ec = text[j]
+                    if (ec >= "A" && ec <= "Z") || (ec >= "a" && ec <= "z") {
+                        i = j
+                        break
+                    }
+                    j = text.index(after: j)
+                }
+            } else {
+                currentLine.append(char)
+            }
+            
+            if i < text.endIndex {
+                i = text.index(after: i)
+            }
+        }
+        
+        lines[lines.count - 1] = currentLine
+        
+        // Limit scrollback to last 400 lines for maximum speed
+        if lines.count > 400 {
+            lines.removeFirst(lines.count - 400)
+        }
+    }
+}
+
 // MARK: - Core Terminal Session State
 
 class TerminalSession: ObservableObject, Identifiable {
     let id = UUID()
+    @Published var terminalBuffer = TerminalBuffer()
     var ptySession: PTYSession?
-    var onDataReceived: ((String) -> Void)?
     
     init() {
         self.ptySession = PTYSession(onData: { [weak self] base64String in
-            self?.onDataReceived?(base64String)
+            if let data = Data(base64Encoded: base64String) {
+                let text = String(decoding: data, as: UTF8.self)
+                DispatchQueue.main.async {
+                    self?.terminalBuffer.append(text)
+                }
+            }
         })
     }
     
@@ -138,160 +195,127 @@ class TerminalSession: ObservableObject, Identifiable {
     }
 }
 
-// MARK: - WebKit xterm.js Terminal Renderer
+// MARK: - Native Keyboard Capture Input View (AppKit -> SwiftUI)
 
-struct TerminalWebView: NSViewRepresentable {
+struct NativeKeyboardInputView: NSViewRepresentable {
+    let onInput: (String) -> Void
+    @Binding var isFocused: Bool
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = KeyboardCaptureNSView()
+        view.onInput = onInput
+        view.onFocusChange = { focused in
+            DispatchQueue.main.async {
+                self.isFocused = focused
+            }
+        }
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+class KeyboardCaptureNSView: NSView {
+    var onInput: ((String) -> Void)?
+    var onFocusChange: ((Bool) -> Void)?
+    
+    override var acceptsFirstResponder: Bool { true }
+    
+    override func becomeFirstResponder() -> Bool {
+        onFocusChange?(true)
+        return super.becomeFirstResponder()
+    }
+    
+    override func resignFirstResponder() -> Bool {
+        onFocusChange?(false)
+        return super.resignFirstResponder()
+    }
+    
+    override func keyDown(with event: NSEvent) {
+        // Map native keyboard codes for system shells
+        if event.keyCode == 126 { // Arrow Up
+            onInput?("\u{1B}[A")
+            return
+        } else if event.keyCode == 125 { // Arrow Down
+            onInput?("\u{1B}[B")
+            return
+        } else if event.keyCode == 124 { // Arrow Right
+            onInput?("\u{1B}[C")
+            return
+        } else if event.keyCode == 123 { // Arrow Left
+            onInput?("\u{1B}[D")
+            return
+        }
+        
+        switch event.keyCode {
+        case 36: // Enter
+            onInput?("\r")
+        case 48: // Tab
+            onInput?("\t")
+        case 51: // Backspace
+            onInput?("\u{7F}")
+        case 53: // Escape
+            onInput?("\u{1B}")
+        default:
+            if let chars = event.characters {
+                onInput?(chars)
+            } else {
+                super.keyDown(with: event)
+            }
+        }
+    }
+    
+    override func mouseDown(with event: NSEvent) {
+        // Click focuses this cell immediately
+        self.window?.makeFirstResponder(self)
+    }
+}
+
+// MARK: - Native SwiftUI Terminal Rendering View
+
+struct NativeTerminalView: View {
     @ObservedObject var session: TerminalSession
+    @State private var isFocused = false
     
-    func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        let contentController = WKUserContentController()
-        
-        contentController.add(context.coordinator, name: "terminalInput")
-        contentController.add(context.coordinator, name: "terminalResize")
-        
-        config.userContentController = contentController
-        
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.navigationDelegate = context.coordinator
-        
-        // Transparent WebView backing
-        webView.setValue(false, forKey: "drawsBackground")
-        
-        let html = getTerminalHTML()
-        webView.loadHTMLString(html, baseURL: URL(string: "https://localhost"))
-        
-        context.coordinator.webView = webView
-        return webView
-    }
-    
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-    
-    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        var parent: TerminalWebView
-        var webView: WKWebView?
-        
-        init(_ parent: TerminalWebView) {
-            self.parent = parent
-            super.init()
+    var body: some View {
+        ZStack {
+            // Invisible, transparent responder that catches keystrokes
+            NativeKeyboardInputView(onInput: { chars in
+                session.ptySession?.write(chars)
+            }, isFocused: $isFocused)
             
-            parent.session.onDataReceived = { [weak self] base64String in
-                self?.writeToTerminal(base64: base64String)
-            }
-        }
-        
-        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            if message.name == "terminalInput", let input = message.body as? String {
-                parent.session.ptySession?.write(input)
-            } else if message.name == "terminalResize", let dict = message.body as? [String: Int] {
-                if let cols = dict["cols"], let rows = dict["rows"] {
-                    parent.session.ptySession?.resize(cols: cols, rows: rows)
+            // Highly optimized native lines list view
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(0..<session.terminalBuffer.lines.count, id: \.self) { index in
+                            Text(session.terminalBuffer.lines[index])
+                                .font(.system(size: 12.5, weight: .regular, design: .monospaced))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        
+                        Color.clear
+                            .frame(height: 1)
+                            .id("bottom")
+                    }
+                    .padding(12)
+                }
+                .onChange(of: session.terminalBuffer.lines.count) {
+                    proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }
         }
-        
-        func writeToTerminal(base64: String) {
-            let js = "writeBase64('\(base64)');"
-            webView?.evaluateJavaScript(js, completionHandler: nil)
-        }
+        .background(isFocused ? Color.purple.opacity(0.04) : Color.clear)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isFocused ? Color.purple.opacity(0.45) : Color.white.opacity(0.08), lineWidth: isFocused ? 1.5 : 1)
+        )
+        .cornerRadius(16)
     }
 }
 
-func getTerminalHTML() -> String {
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
-        <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-        <style>
-            html, body {
-                margin: 0;
-                padding: 0;
-                width: 100%;
-                height: 100%;
-                background: transparent !important;
-                overflow: hidden;
-            }
-            #terminal-container {
-                width: 100%;
-                height: 100%;
-                background: transparent !important;
-                padding: 12px;
-                box-sizing: border-box;
-            }
-            .xterm .xterm-viewport {
-                background-color: transparent !important;
-            }
-            .xterm-screen {
-                background-color: transparent !important;
-            }
-        </style>
-    </head>
-    <body>
-        <div id="terminal-container"></div>
-        <script>
-            const term = new Terminal({
-                allowProposedApi: true,
-                theme: {
-                    background: 'transparent',
-                    foreground: '#ffffff',
-                    cursor: '#a855f7',
-                    selectionBackground: 'rgba(168, 85, 247, 0.3)',
-                    black: '#000000',
-                    red: '#ef4444',
-                    green: '#22c55e',
-                    yellow: '#eab308',
-                    blue: '#3b82f6',
-                    magenta: '#a855f7',
-                    cyan: '#06b6d4',
-                    white: '#ffffff',
-                },
-                cursorBlink: true,
-                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-                fontSize: 12.5,
-                rows: 30,
-                cols: 80
-            });
-            
-            term.open(document.getElementById('terminal-container'));
-            
-            term.onData(data => {
-                window.webkit.messageHandlers.terminalInput.postMessage(data);
-            });
-            
-            function writeBase64(base64) {
-                try {
-                    const raw = atob(base64);
-                    term.write(raw);
-                } catch(e) {
-                    console.error("Base64 write error", e);
-                }
-            }
-            
-            function reportResize() {
-                const cols = Math.floor((window.innerWidth - 24) / 7.5);
-                const rows = Math.floor((window.innerHeight - 24) / 15.0);
-                if (cols > 0 && rows > 0) {
-                    term.resize(cols, rows);
-                    window.webkit.messageHandlers.terminalResize.postMessage({ cols, rows });
-                }
-            }
-            
-            window.addEventListener('resize', reportResize);
-            setTimeout(reportResize, 150);
-        </script>
-    </body>
-    </html>
-    """
-}
-
-// MARK: - Visual Effect (Desktop Vibrancy Backdrop)
+// MARK: - Desktop Vibrancy Backdrop
 
 struct VisualEffectView: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .hudWindow
@@ -309,50 +333,6 @@ struct VisualEffectView: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-// MARK: - Minimalist Glassmorphic Pane Container
-
-struct GlassCard<Content: View>: View {
-    let content: Content
-    
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            content
-        }
-        .background(Color.black.opacity(0.28))
-        .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.12),
-                            Color.white.opacity(0.02)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
-    }
-}
-
-struct PaneView: View {
-    @ObservedObject var session: TerminalSession
-    
-    var body: some View {
-        GlassCard {
-            TerminalWebView(session: session)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-}
-
 // MARK: - Clean Resizable Grid Split Controller
 
 class WorkspaceManager: ObservableObject {
@@ -368,7 +348,6 @@ class WorkspaceManager: ObservableObject {
     @Published var sessions: [TerminalSession] = []
     
     init() {
-        // Maintain up to 6 PTY instances, cleanly mapped
         self.sessions = [
             TerminalSession(),
             TerminalSession(),
@@ -388,18 +367,18 @@ struct GridContainerView: View {
             switch workspaceManager.currentLayout {
             case .single:
                 if workspaceManager.sessions.count > 0 {
-                    PaneView(session: workspaceManager.sessions[0])
+                    NativeTerminalView(session: workspaceManager.sessions[0])
                         .padding(14)
                 }
                 
             case .doubleHorizontal:
                 HSplitView {
                     if workspaceManager.sessions.count > 0 {
-                        PaneView(session: workspaceManager.sessions[0])
+                        NativeTerminalView(session: workspaceManager.sessions[0])
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     if workspaceManager.sessions.count > 1 {
-                        PaneView(session: workspaceManager.sessions[1])
+                        NativeTerminalView(session: workspaceManager.sessions[1])
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
@@ -408,11 +387,11 @@ struct GridContainerView: View {
             case .doubleVertical:
                 VSplitView {
                     if workspaceManager.sessions.count > 0 {
-                        PaneView(session: workspaceManager.sessions[0])
+                        NativeTerminalView(session: workspaceManager.sessions[0])
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     if workspaceManager.sessions.count > 1 {
-                        PaneView(session: workspaceManager.sessions[1])
+                        NativeTerminalView(session: workspaceManager.sessions[1])
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
@@ -422,11 +401,11 @@ struct GridContainerView: View {
                 HSplitView {
                     VSplitView {
                         if workspaceManager.sessions.count > 0 {
-                            PaneView(session: workspaceManager.sessions[0])
+                            NativeTerminalView(session: workspaceManager.sessions[0])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         if workspaceManager.sessions.count > 1 {
-                            PaneView(session: workspaceManager.sessions[1])
+                            NativeTerminalView(session: workspaceManager.sessions[1])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
@@ -434,11 +413,11 @@ struct GridContainerView: View {
                     
                     VSplitView {
                         if workspaceManager.sessions.count > 2 {
-                            PaneView(session: workspaceManager.sessions[2])
+                            NativeTerminalView(session: workspaceManager.sessions[2])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         if workspaceManager.sessions.count > 3 {
-                            PaneView(session: workspaceManager.sessions[3])
+                            NativeTerminalView(session: workspaceManager.sessions[3])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
@@ -450,11 +429,11 @@ struct GridContainerView: View {
                 HSplitView {
                     VSplitView {
                         if workspaceManager.sessions.count > 0 {
-                            PaneView(session: workspaceManager.sessions[0])
+                            NativeTerminalView(session: workspaceManager.sessions[0])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         if workspaceManager.sessions.count > 3 {
-                            PaneView(session: workspaceManager.sessions[3])
+                            NativeTerminalView(session: workspaceManager.sessions[3])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
@@ -462,11 +441,11 @@ struct GridContainerView: View {
                     
                     VSplitView {
                         if workspaceManager.sessions.count > 1 {
-                            PaneView(session: workspaceManager.sessions[1])
+                            NativeTerminalView(session: workspaceManager.sessions[1])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         if workspaceManager.sessions.count > 4 {
-                            PaneView(session: workspaceManager.sessions[4])
+                            NativeTerminalView(session: workspaceManager.sessions[4])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
@@ -474,11 +453,11 @@ struct GridContainerView: View {
                     
                     VSplitView {
                         if workspaceManager.sessions.count > 2 {
-                            PaneView(session: workspaceManager.sessions[2])
+                            NativeTerminalView(session: workspaceManager.sessions[2])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         if workspaceManager.sessions.count > 5 {
-                            PaneView(session: workspaceManager.sessions[5])
+                            NativeTerminalView(session: workspaceManager.sessions[5])
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
@@ -555,11 +534,11 @@ struct ContentView: View {
     
     var body: some View {
         ZStack(alignment: .top) {
-            // Edge-to-edge resizable PTY shell splits
+            // Streamlined, resizable terminal splits
             GridContainerView(workspaceManager: workspaceManager)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             
-            // Ultra-minimal floating Dynamic Island layout switcher at the top center
+            // Layout pill controls at the top center
             FloatingLayoutSwitcher(workspaceManager: workspaceManager)
                 .padding(.top, 25)
         }
@@ -580,10 +559,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             window.isOpaque = false
             window.hasShadow = true
             
-            // Allow dragging the entire window from any background space
             window.isMovableByWindowBackground = true
             
-            // Set starting bounds
             window.setFrame(NSRect(x: 100, y: 100, width: 1360, height: 840), display: true)
             window.minSize = NSSize(width: 800, height: 500)
         }
