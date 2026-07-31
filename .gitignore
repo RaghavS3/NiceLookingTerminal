@@ -1,12 +1,10 @@
-# Dependency directories
+# Dependency and Runtime directories
 node_modules/
 bun.lockb
 
-# Log files
+# Log and OS files
 *.log
 *.log.*
-
-# OS files
 .DS_Store
 Thumbs.db
 
@@ -15,3 +13,20 @@ Thumbs.db
 .env.local
 .env.development
 .env.production
+
+# Swift Build Artifacts
+.build/
+
+# Application Binaries and Bundles
+/MyTerm
+MyTerm.app/
+dist/
+
+# Code Signatures / Local Security Artifacts
+*.provisionprofile
+*.cert
+*.p12
+signatures/
+
+# Runtime Attachments (relocated in a later task)
+attachments/

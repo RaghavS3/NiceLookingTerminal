@@ -1,8 +1,12 @@
-# NiceLookingTerminal
+# MyTerm: Premium Terminal Environment
 
-A gorgeous, premium, web-powered terminal environment running locally with full system permissions, supporting multiple resizable side-by-side terminal instances.
+A high-performance, aesthetically pleasing terminal environment for macOS.
 
-## Core Stack
-- **Runtime**: Bun (extremely fast JavaScript/TypeScript runner)
-- **Frontend**: Premium HTML/CSS/JS (vanilla design system)
-- **Features**: Resizable split-pane terminal workspace
+## Active Development
+The active product application is located at [Sources/MyTerm/main.swift](Sources/MyTerm/main.swift).
+
+## Building
+To build the project:
+```bash
+swift build
+```
