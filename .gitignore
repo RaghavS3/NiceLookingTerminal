@@ -28,5 +28,5 @@ dist/
 *.p12
 signatures/
 
-# Runtime Attachments (relocated in a later task)
+# Legacy repository attachments; runtime copies live in Application Support.
 attachments/
