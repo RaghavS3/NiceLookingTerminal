@@ -183,10 +183,14 @@ final class TerminalRegistry: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     func focusView(for id: UUID) {
-        if let terminal = cache[id] {
-            DispatchQueue.main.async {
-                terminal.window?.makeFirstResponder(terminal)
+        guard let terminal = cache[id] else { return }
+        DispatchQueue.main.async { [weak self, weak terminal] in
+            guard let self, let terminal, self.cache[id] === terminal else { return }
+            if WorkspaceManager.shared?.activeSessionID != id {
+                WorkspaceManager.shared?.activeSessionID = id
             }
+            guard terminal.window?.firstResponder !== terminal else { return }
+            terminal.window?.makeFirstResponder(terminal)
         }
     }
 
