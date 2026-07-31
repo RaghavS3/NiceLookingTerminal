@@ -6,7 +6,6 @@ import SwiftTerm
 
 private enum TerminalConfiguration {
     static let scrollbackLines = 100_000
-    static let backgroundColor = NSColor(srgbRed: 0.045, green: 0.052, blue: 0.061, alpha: 1)
 }
 
 final class LoginShellEnvironment {
@@ -106,12 +105,12 @@ final class TerminalRegistry: NSObject, LocalProcessTerminalViewDelegate {
         }
 
         terminal.changeScrollback(TerminalConfiguration.scrollbackLines)
-        terminal.font = NSFont.monospacedSystemFont(ofSize: 13.5, weight: .medium)
+        terminal.font = NSFont.monospacedSystemFont(ofSize: 13.5, weight: .semibold)
         terminal.nativeForegroundColor = NSColor.white
-        terminal.nativeBackgroundColor = TerminalConfiguration.backgroundColor
+        terminal.nativeBackgroundColor = .clear
         terminal.wantsLayer = true
-        terminal.layer?.backgroundColor = TerminalConfiguration.backgroundColor.cgColor
-        terminal.layer?.isOpaque = true
+        terminal.layer?.backgroundColor = NSColor.clear.cgColor
+        terminal.layer?.isOpaque = false
         terminal.layer?.drawsAsynchronously = false
         terminal.layer?.cornerRadius = 12
         terminal.layer?.masksToBounds = true

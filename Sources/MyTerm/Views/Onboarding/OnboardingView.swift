@@ -216,6 +216,10 @@ struct OnboardingView: View {
         }
         .padding(28)
         .frame(width: 660, height: 680)
+        .background(
+            VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow)
+                .overlay(Color.black.opacity(0.08))
+        )
         .onAppear { manager.refreshHealth() }
         .confirmationDialog(
             cleanupRequest?.title ?? "Clean up app data?",
