@@ -12,7 +12,7 @@ Run this checklist on the built macOS app after UI or terminal changes. Record t
 
 - [ ] **Shell launch:** Type `pwd`, `printf 'shell-ok\\n'`, and `exit` only if testing in a disposable tab. The shell is interactive, accepts input, and renders the command output.
 - [ ] **Project launch:** Open the fixture directory from the Workspace sidebar. A new terminal opens there and uses the directory name as its title.
-- [ ] **Multiple sessions:** Create two or more tabs. Click an inactive cell and confirm it becomes active; maximize and restore a cell.
+- [ ] **Multiple sessions:** Create two or more tabs. Click an inactive cell and confirm it becomes active; drag immediately on inactive terminal text and confirm the same first mouse-down both activates the pane and starts selection; maximize and restore a cell.
 - [ ] **Large grid:** Restore or create thirty tabs. Use the grid scrollbar/gutters to reach every pane and confirm no pane is compressed below its readable minimum.
 - [ ] **Streaming scroll:** Run a continuously producing command, scroll upward, and confirm new output does not move the viewport. Confirm **New output** appears and returns to the latest line.
 - [ ] **Large history:** Produce 100,000 numbered lines and verify the first and last lines remain reachable.
@@ -37,7 +37,7 @@ Run this checklist on the built macOS app after UI or terminal changes. Record t
 - [ ] Cmd+T creates a terminal tab.
 - [ ] Cmd+W closes the active terminal tab.
 - [ ] Cmd+Shift+T restores the last closed tab or saved session set.
-- [ ] Cmd+C, Cmd+V, Cmd+X, and Cmd+A continue to route to the focused terminal/text control.
+- [ ] Cmd+C, Cmd+V, Cmd+X, and Cmd+A continue to route to the focused terminal/text control. Copy from one pane, click another pane once, paste, and confirm the paste lands in the newly active pane.
 - [ ] Cmd+Backspace clears the active terminal input line.
 - [ ] Cmd+A selects all text in the focused native editor or terminal without clearing its contents.
 - [ ] With onboarding, a terminal title editor, or Planner text editor focused, Cmd+W does not silently close a terminal behind that interface.

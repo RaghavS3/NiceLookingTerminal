@@ -14,8 +14,12 @@ struct GridCell: View {
     var body: some View {
         ZStack {
             // Flush terminal layout spanning 100% of cell
-            TerminalCellView(session: session)
-                .padding(8)
+            TerminalCellView(session: session) {
+                if manager.activeSessionID != session.id {
+                    manager.activeSessionID = session.id
+                }
+            }
+            .padding(8)
 
             inactiveOverlay
 
@@ -115,15 +119,9 @@ struct GridCell: View {
     private var inactiveOverlay: some View {
         ZStack {
             if !isActive {
-                // Dimming layer that allows clicks to pass through if it's already active or for selection
+                // Visual state only. The native terminal host owns focus so the first
+                // mouse-down can also begin a selection in an inactive pane.
                 Color.black.opacity(0.35)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            manager.activeSessionID = session.id
-                            TerminalRegistry.shared.focusView(for: session.id)
-                        }
-                    }
 
                 if !session.title.isEmpty {
                     Text(session.title.uppercased())
@@ -138,7 +136,7 @@ struct GridCell: View {
                 }
             }
         }
-        .allowsHitTesting(!isActive)  // If active, the entire ZStack doesn't intercept hits
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
