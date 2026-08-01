@@ -15,6 +15,8 @@ Run this checklist on the built macOS app after UI or terminal changes. Record t
 - [ ] **Multiple sessions:** Create two or more tabs. Click an inactive cell and confirm it becomes active; drag immediately on inactive terminal text and confirm the same first mouse-down both activates the pane and starts selection; maximize and restore a cell.
 - [ ] **Large grid:** Restore or create thirty tabs. Use the grid scrollbar/gutters to reach every pane and confirm no pane is compressed below its readable minimum.
 - [ ] **Streaming scroll:** Run a continuously producing command, scroll upward, and confirm new output does not move the viewport. Confirm **New output** appears and returns to the latest line.
+- [ ] **Selection auto-scroll:** Start selecting near the bottom of a long transcript, keep the mouse held, and drag past the top edge. Confirm the viewport keeps scrolling and the selection extends through newly revealed rows; repeat toward the bottom edge.
+- [ ] **Voice input:** Focus a terminal prompt and dictate a disposable command with macOS Dictation, Whisper Flow, or Willow Voice. Confirm the terminal is recognized as a text area and receives the dictated text without executing it automatically.
 - [ ] **Large history:** Produce 100,000 numbered lines and verify the first and last lines remain reachable.
 - [ ] **Close and restore:** Close the active tab with its close control and with Cmd+W. Use Cmd+Shift+T to reopen the last closed tab, then relaunch the app and confirm saved sessions restore.
 - [ ] **Process tree:** In a disposable tab, launch a background child process, close the pane, and confirm both the shell and child have exited.
@@ -45,7 +47,8 @@ Run this checklist on the built macOS app after UI or terminal changes. Record t
 
 ## Agent presets
 
-- [ ] Cmd+O and **Open Codex** open the selected workspace in Codex Desktop; the local Codex terminal is clearly marked as not phone-synced.
+- [ ] Cmd+O and **Open Codex** create a new embedded Codex tab in the selected workspace with `--yolo --no-alt-screen`; they do not open Codex Desktop.
+- [ ] **Codex Desktop — phone-ready** and the onboarding Desktop control still open the selected workspace in Codex Desktop.
 - [ ] Open the agent preset menu and confirm the local Codex and AGY descriptors, icons, labels, and shortcuts are present.
 - [ ] If the local machine is explicitly authorized and the corresponding CLI is installed, verify that selecting a preset creates a titled agent tab and inserts its configured command.
 - [ ] Do not run real networked Codex or AGY sessions as part of automated testing. For a manual smoke run, stop after descriptor/tab/command verification unless an operator has explicitly authorized the session.

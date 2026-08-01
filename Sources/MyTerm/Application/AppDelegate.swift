@@ -67,7 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             window?.performClose(nil)
         }
     }
-    @objc func openCodexDesktop() { NotificationCenter.default.post(name: AppNotification.openCodexDesktop, object: nil) }
+    @objc func openCodexAgent() { NotificationCenter.default.post(name: AppNotification.openCodexAgent, object: nil) }
     @objc func newLocalCodexTerminal() {
         NotificationCenter.default.post(name: AppNotification.runAgentPreset, object: AgentPreset.localCodex.rawValue)
     }
@@ -201,7 +201,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(restoreItem)
 
         let openCodexItem = NSMenuItem(
-            title: "Open Workspace in Codex Desktop", action: #selector(AppDelegate.openCodexDesktop), keyEquivalent: "o")
+            title: "New Codex --yolo Agent", action: #selector(AppDelegate.openCodexAgent), keyEquivalent: "o")
         openCodexItem.keyEquivalentModifierMask = [.command]
         fileMenu.addItem(openCodexItem)
 

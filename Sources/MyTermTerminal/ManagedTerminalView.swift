@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftTerm
 
@@ -9,6 +10,72 @@ public final class ManagedTerminalView: LocalProcessTerminalView {
     private var lastKnownBottomRow = 0
     private var anchoredNormalRow = 0
     private var transcriptRecorder: TranscriptRecorder?
+
+    // SwiftTerm already implements NSTextInputClient, but a plain NSView is
+    // otherwise exposed as a container. Voice-input tools discover editable
+    // destinations through the accessibility role and focus contract.
+    public override func isAccessibilityElement() -> Bool {
+        true
+    }
+
+    public override func accessibilityRole() -> NSAccessibility.Role? {
+        .textArea
+    }
+
+    public override func accessibilityLabel() -> String? {
+        "Terminal input"
+    }
+
+    public override func accessibilityHelp() -> String? {
+        "Type or dictate a command into the focused terminal."
+    }
+
+    public override func accessibilityPlaceholderValue() -> String? {
+        "Type a command"
+    }
+
+    public override func isAccessibilityFocused() -> Bool {
+        window?.firstResponder === self
+    }
+
+    public override func setAccessibilityFocused(_ accessibilityFocused: Bool) {
+        if accessibilityFocused {
+            window?.makeFirstResponder(self)
+        } else if window?.firstResponder === self {
+            window?.makeFirstResponder(nil)
+        }
+    }
+
+    public override func accessibilityValue() -> Any? {
+        getSelection() ?? ""
+    }
+
+    public override func accessibilitySelectedText() -> String? {
+        getSelection() ?? ""
+    }
+
+    public override func setAccessibilitySelectedText(_ accessibilitySelectedText: String?) {
+        insertAccessibilityText(accessibilitySelectedText)
+    }
+
+    public override func accessibilitySelectedTextRange() -> NSRange {
+        let length = (getSelection() ?? "").utf16.count
+        return NSRange(location: 0, length: length)
+    }
+
+    public override func accessibilityNumberOfCharacters() -> Int {
+        (getSelection() ?? "").utf16.count
+    }
+
+    public override func accessibilityVisibleCharacterRange() -> NSRange {
+        accessibilitySelectedTextRange()
+    }
+
+    private func insertAccessibilityText(_ text: String?) {
+        guard let text, !text.isEmpty else { return }
+        insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        NSAccessibility.post(element: self, notification: .valueChanged)
+    }
 
     public func configureTranscript(
         directory: URL,

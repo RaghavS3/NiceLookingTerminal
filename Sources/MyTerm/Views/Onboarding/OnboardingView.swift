@@ -78,7 +78,7 @@ struct OnboardingView: View {
 
                         if manager.preferences.accessMode == .full {
                             Text(
-                                "Local agents start with their documented skip-permission mode. macOS still requires one manual Full Disk Access approval; apps cannot grant that permission to themselves."
+                                "All local agents start with their documented skip-permission mode. macOS still requires one manual Full Disk Access approval; apps cannot grant that permission to themselves."
                             )
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
@@ -112,7 +112,7 @@ struct OnboardingView: View {
                                 }
                             }
                         } else {
-                            Text("Agents use their normal approval flow.")
+                            Text("Agent-menu launches use their normal approval flow. Open Codex remains the explicit full-access shortcut.")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                         }
@@ -120,7 +120,7 @@ struct OnboardingView: View {
 
                     Divider().padding(.vertical, 18)
 
-                    setupSection(number: "3", title: "Phone control") {
+                    setupSection(number: "3", title: "Phone control (optional)") {
                         Text(
                             "Open Codex Desktop, choose Set up Remote, and scan its QR code with the ChatGPT phone app. The Mac must stay awake, online, signed in, and running Codex Desktop."
                         )
@@ -155,7 +155,7 @@ struct OnboardingView: View {
 
                     setupSection(number: "4", title: "Setup health") {
                         HStack {
-                            Text("Required tools and the desktop connection are checked from your login environment.")
+                            Text("Required tools and optional agent integrations are checked from your login environment.")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                             Spacer()

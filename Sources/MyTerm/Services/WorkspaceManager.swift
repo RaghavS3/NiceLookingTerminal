@@ -73,7 +73,7 @@ class WorkspaceManager: ObservableObject {
         let accessReady =
             preferences.accessMode != .full
             || (!accessChecks.isEmpty && accessChecks.allSatisfy(\.isReadable))
-        return toolsReady && accessReady && isNetworkAvailable && preferences.remoteSetupConfirmed
+        return toolsReady && accessReady && isNetworkAvailable
     }
 
     init(
@@ -101,8 +101,6 @@ class WorkspaceManager: ObservableObject {
         self.isShowingSetup = !self.preferences.onboardingCompleted || identityChanged
         if let preferencesLoadError {
             self.launchError = "Setup preferences were unreadable and have been reset. \(preferencesLoadError.localizedDescription)"
-        } else if identityChanged {
-            self.launchError = "The app’s signing identity changed. Recheck Full Disk Access and setup health before starting agents."
         }
         WorkspaceManager.shared = self
         networkMonitor.pathUpdateHandler = { [weak self] path in
@@ -237,8 +235,9 @@ class WorkspaceManager: ObservableObject {
                     id: "codex", label: "Codex CLI", detail: codexPath ?? "Run the supported Codex CLI installer",
                     isReady: codexPath != nil, isRequired: true),
                 HealthCheck(
-                    id: "desktop", label: "Codex Desktop", detail: desktopApp?.path ?? "Use ‘Open this workspace in Codex’ to install it",
-                    isReady: desktopApp != nil, isRequired: true),
+                    id: "desktop", label: "Codex Desktop",
+                    detail: desktopApp?.path ?? "Optional — install only for phone Remote",
+                    isReady: desktopApp != nil, isRequired: false),
                 HealthCheck(
                     id: "git", label: "Git", detail: gitPath ?? "Install Apple command-line tools", isReady: gitPath != nil,
                     isRequired: true),
@@ -305,7 +304,7 @@ class WorkspaceManager: ObservableObject {
 
     func finishSetup() {
         guard isSetupReady else {
-            launchError = "Setup is not ready yet. Resolve the highlighted access, tool, network, and Remote checks first."
+            launchError = "Setup is not ready yet. Resolve the highlighted access, tool, and network checks first."
             return
         }
         preferences.onboardingCompleted = true
@@ -428,14 +427,28 @@ class WorkspaceManager: ObservableObject {
         }
     }
 
-    func addSession(for preset: AgentPreset) {
+    func makeAgentSession(
+        for preset: AgentPreset,
+        accessMode: AgentAccessMode
+    ) -> TerminalSession {
+        let session = TerminalSession()
+        session.title = preset.title
+        session.isAgent = true
+        session.agentPreset = preset.rawValue
+        session.agentAccessMode = accessMode
+        session.customDirectory = selectedWorkspaceURL.path
+        return session
+    }
+
+    func addSession(
+        for preset: AgentPreset,
+        accessMode: AgentAccessMode? = nil
+    ) {
         withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-            let newSession = TerminalSession()
-            newSession.title = preset.title
-            newSession.isAgent = true
-            newSession.agentPreset = preset.rawValue
-            newSession.agentAccessMode = preferences.accessMode
-            newSession.customDirectory = selectedWorkspaceURL.path
+            let newSession = makeAgentSession(
+                for: preset,
+                accessMode: accessMode ?? preferences.accessMode
+            )
             sessions.append(newSession)
             activeSessionID = newSession.id
             maximizedSessionID = nil
@@ -486,9 +499,17 @@ class WorkspaceManager: ObservableObject {
         }
     }
 
-    func runPreset(_ preset: AgentPreset) {
+    func runPreset(
+        _ preset: AgentPreset,
+        accessMode: AgentAccessMode? = nil
+    ) {
         mode = .terminals
-        addSession(for: preset)
+        addSession(for: preset, accessMode: accessMode)
+    }
+
+    func openCodexAgent() {
+        PerformanceTelemetry.event("Codex Agent Launch")
+        runPreset(.localCodex, accessMode: .full)
     }
 
     func openCodexDesktop() {

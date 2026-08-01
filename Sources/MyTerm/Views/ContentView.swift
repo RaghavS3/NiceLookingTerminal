@@ -56,8 +56,8 @@ struct ContentView: View {
             }
             workspaceManager.runPreset(preset)
         }
-        .onReceive(NotificationCenter.default.publisher(for: AppNotification.openCodexDesktop)) { _ in
-            workspaceManager.openCodexDesktop()
+        .onReceive(NotificationCenter.default.publisher(for: AppNotification.openCodexAgent)) { _ in
+            workspaceManager.openCodexAgent()
         }
         .onReceive(NotificationCenter.default.publisher(for: AppNotification.clearTerminalInput)) { _ in
             if workspaceManager.mode == .terminals {

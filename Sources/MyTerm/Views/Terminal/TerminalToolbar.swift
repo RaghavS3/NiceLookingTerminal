@@ -71,7 +71,7 @@ struct TopNavigationBar: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
 
-                    Button(action: { manager.openCodexDesktop() }) {
+                    Button(action: { manager.openCodexAgent() }) {
                         HStack(spacing: 6) {
                             Image(systemName: "circle.hexagongrid.fill")
                             Text("Open Codex")
@@ -84,8 +84,7 @@ struct TopNavigationBar: View {
                         .cornerRadius(8)
                     }
                     .buttonStyle(.plain)
-                    .disabled(manager.isOpeningCodexDesktop)
-                    .help("Open the selected workspace in Codex Desktop for phone Remote")
+                    .help("Open a new Codex --yolo agent in the selected workspace")
 
                     Button(action: { manager.addSession() }) {
                         HStack(spacing: 6) {

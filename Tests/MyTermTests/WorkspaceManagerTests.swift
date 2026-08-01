@@ -42,7 +42,6 @@ final class WorkspaceManagerTests: XCTestCase {
             attachmentStore: AttachmentPathStore(directoryURL: directories.attachments),
             preferencesStore: AppPreferencesStore(fileURL: directories.applicationSupport.appendingPathComponent("preferences.json"))
         )
-        manager.preferences.remoteSetupConfirmed = true
         manager.isNetworkAvailable = true
         manager.healthChecks = [
             .init(id: "required", label: "Required", detail: "ready", isReady: true, isRequired: true),
@@ -53,6 +52,25 @@ final class WorkspaceManagerTests: XCTestCase {
 
         manager.healthChecks[0] = .init(id: "required", label: "Required", detail: "missing", isReady: false, isRequired: true)
         XCTAssertFalse(manager.isSetupReady)
+        TerminalRegistry.shared.terminateAll()
+    }
+
+    func testOptionalDesktopAndRemoteDoNotBlockSetup() throws {
+        let directories = try TemporaryTestDirectories()
+        let manager = WorkspaceManager(
+            sessionStore: SessionSettingsStore(fileURL: directories.applicationSupport.appendingPathComponent("sessions.json")),
+            attachmentStore: AttachmentPathStore(directoryURL: directories.attachments),
+            preferencesStore: AppPreferencesStore(fileURL: directories.applicationSupport.appendingPathComponent("preferences.json"))
+        )
+        manager.preferences.remoteSetupConfirmed = false
+        manager.isNetworkAvailable = true
+        manager.healthChecks = [
+            .init(id: "codex", label: "Codex CLI", detail: "ready", isReady: true, isRequired: true),
+            .init(id: "desktop", label: "Codex Desktop", detail: "optional", isReady: false, isRequired: false),
+        ]
+        manager.preferences.accessMode = .standard
+
+        XCTAssertTrue(manager.isSetupReady)
         TerminalRegistry.shared.terminateAll()
     }
 
@@ -75,7 +93,26 @@ final class WorkspaceManagerTests: XCTestCase {
         )
 
         XCTAssertTrue(manager.isShowingSetup)
-        XCTAssertTrue(manager.launchError?.contains("signing identity changed") == true)
+        XCTAssertNil(manager.launchError)
+        TerminalRegistry.shared.terminateAll()
+    }
+
+    func testFullAccessCodexSessionUsesYoloWithoutLaunchingAnAgent() throws {
+        let directories = try TemporaryTestDirectories()
+        let manager = WorkspaceManager(
+            sessionStore: SessionSettingsStore(fileURL: directories.applicationSupport.appendingPathComponent("sessions.json")),
+            attachmentStore: AttachmentPathStore(directoryURL: directories.attachments),
+            preferencesStore: AppPreferencesStore(fileURL: directories.applicationSupport.appendingPathComponent("preferences.json"))
+        )
+
+        let session = manager.makeAgentSession(for: .localCodex, accessMode: .full)
+
+        XCTAssertEqual(session.title, AgentPreset.localCodex.title)
+        XCTAssertEqual(session.customDirectory, manager.selectedWorkspaceURL.path)
+        XCTAssertEqual(
+            session.launchDescriptor,
+            AgentLaunchDescriptor(executableName: "codex", arguments: ["--yolo", "--no-alt-screen"])
+        )
         TerminalRegistry.shared.terminateAll()
     }
 }

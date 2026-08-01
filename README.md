@@ -1,6 +1,6 @@
 # NiceLookingTerminal
 
-A native macOS terminal workspace for running shells and coding agents side by side, with a supported path into Codex Desktop and phone Remote.
+A native macOS terminal workspace for running shells and coding agents side by side, with optional Codex Desktop and phone Remote setup.
 
 ## Terminal behavior
 
@@ -14,11 +14,13 @@ A native macOS terminal workspace for running shells and coding agents side by s
 
 Cmd+A follows the focused macOS responder. In a terminal it selects retained terminal content; in a native text editor it selects that editor. Cmd+Backspace sends Ctrl+U only when a terminal is focused.
 
-## Codex Desktop and phone Remote
+## Codex agents, Desktop, and phone Remote
 
-The primary **Open Codex** action and Cmd+O run the stable `codex app PATH` command for the selected workspace. That opens the workspace in Codex Desktop, or starts the supported desktop installer when the app is missing. The separate local terminal option is labeled as not phone-synced.
+The primary **Open Codex** action and Cmd+O create a new embedded agent in the selected workspace with `codex --yolo --no-alt-screen`. The no-alternate-screen flag keeps the agent usable inside the app's retained terminal viewport. This action grants the agent full access without approval prompts.
 
-First-run setup checks the Codex CLI, Codex Desktop, Git, the login shell, optional AGY, workspace access, protected folders, network, and explicit Remote setup confirmation. **Set up Remote** opens the supported Codex Desktop connection settings directly. The host must remain awake, online, signed in, and running Codex Desktop.
+The separately labeled **Codex Desktop — phone-ready** and onboarding controls open the workspace in Codex Desktop for phone Remote setup.
+
+First-run setup requires the Codex CLI, Git, a working login shell, workspace access, and network connectivity. Codex Desktop, AGY, and phone Remote confirmation are optional. **Set up Remote** opens the supported Codex Desktop connection settings directly. For Remote use, the host must remain awake, online, signed in, and running Codex Desktop.
 
 Full Agent Access persists the user’s explicit choice and applies skip-permission flags to future embedded agent launches. macOS Full Disk Access remains a separate one-time System Settings approval that an app cannot grant itself.
 
